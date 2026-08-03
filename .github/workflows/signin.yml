@@ -40,6 +40,8 @@ jobs:
           # 可在仓库 Variables 覆盖；未设置时用 yescaptcha
           CAPTCHA_PROVIDER: ${{ vars.CAPTCHA_PROVIDER || 'yescaptcha' }}
           CAPTCHA_KEY:      ${{ secrets.CAPTCHA_KEY }}
+          # HTTPS 代理（绕过 Cloudflare 对海外 IP 的拦截）；逗号分隔多个，留空则直连
+          PROXY_URL:       ${{ secrets.PROXY_URL }}
           CAPTCHA_TIMEOUT:  '180'
           # 错开整点，降低被风控概率（0-600 秒随机）
           RANDOM_DELAY:     '600'
