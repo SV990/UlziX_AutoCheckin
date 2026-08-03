@@ -19,6 +19,10 @@ UlziX 积分商城 每日自动签到
   CAPTCHA_PROVIDER   nopecha | yescaptcha | capsolver | twocaptcha | manual
                      manual = 不打码，仅推送提醒卡片由人工点击
   CAPTCHA_KEY        打码平台 API Key   (manual 模式外必填)
+  PROXY_URL          可选，HTTPS 代理，逗号分隔多个；用于绕过 Cloudflare 对
+                     海外 IP 的拦截（如 GitHub Actions 机房）。例:
+                     https://1.2.3.4:1080,https://5.6.7.8:1080
+                     留空则直连
 """
 
 from __future__ import annotations
@@ -35,6 +39,12 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import requests
+
+# 代理使用自签证书时关闭证书告警（仅影响日志，不改变任何校验行为）
+try:
+    requests.packages.urllib3.disable_warnings()
+except Exception:
+    pass
 
 # ---------------------------------------------------------------- 基础配置
 
@@ -75,41 +85,123 @@ def load_dotenv(path: str = ".env") -> None:
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
+# ---------------------------------------------------------------- 代理（可选）
+
+def parse_proxies(raw: str) -> list[str]:
+    """解析 PROXY_URL：支持逗号分隔多个，自动补全 https:// 前缀。"""
+    out = []
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "://" not in item:
+            item = "https://" + item
+        out.append(item)
+    return out
+
+
+def probe_proxy(url: str, timeout: int = 20) -> bool:
+    """探测该代理能否访问目标登录页（返回真实 FOSSBilling 页面而非 CF 挑战页）。
+
+    注意：用户提供的 HTTPS 代理使用自签证书，须 verify=False 才能握手。
+    """
+    try:
+        r = requests.get(f"{BASE_URL}/login",
+                         proxies={"http": url, "https": url},
+                         timeout=timeout, verify=False,
+                         headers={"User-Agent": UA})
+        return r.status_code == 200 and "csrf-token" in r.text
+    except Exception:
+        return False
+
+
+def pick_proxy(raw: str) -> str | None:
+    """从 PROXY_URL 中选一个能用的 HTTPS 代理；全部不可用返回 None。"""
+    urls = parse_proxies(raw)
+    if not urls:
+        return None
+    log(f"检测到 {len(urls)} 个代理，逐个探测目标站可达性…")
+    for u in urls:
+        log(f"  探测 {u} …")
+        if probe_proxy(u):
+            log(f"  可用: {u}")
+            return u
+        log(f"  不可用: {u}", "WARN")
+    return None
+
+
 # ---------------------------------------------------------------- IP 归属地
 
 # api.ip.sb 返回示例:
 # {"ip":"20.3.221.188","country_code":"US","country":"United States",
 #  "region":"Washington","city":"Quincy","asn_organization":"Microsoft Corporation",...}
 IPINFO_API = "https://api.ip.sb/geoip"
+# 兜底 IP 库：经代理时 api.ip.sb/geoip 常被拦（HTTP 403），ipinfo.io/json 仍能返回完整归属地
+IPINFO_FALLBACK = "https://ipinfo.io/json"
+
+# (名称, URL) 列表，按顺序尝试，任一成功即返回
+_GEO_SOURCES = [
+    ("api.ip.sb", IPINFO_API),
+    ("ipinfo.io", IPINFO_FALLBACK),
+]
 
 
-def ip_location() -> dict:
-    """查询当前出口 IP 及其归属地（直连查询，无代理）。
+def _norm_ipsb(d: dict) -> dict:
+    return {
+        "ip": d.get("ip", ""),
+        "country": d.get("country") or d.get("country_code", ""),
+        "region": d.get("region", ""),
+        "city": d.get("city", ""),
+        "asn_organization": d.get("asn_organization", ""),
+    }
 
-    返回示例：{"ip":"x.x.x.x","country":"US","city":"Quincy","asn_organization":"Microsoft"}
-    失败时返回 {"ip":"查询失败 - <原因>","country":"","region":"","city":"",
-                 "asn_organization":"","_error":"<原因>"}，便于上层卡片区分显示。
+
+def _norm_ipinfo(d: dict) -> dict:
+    # ipinfo.io 的 country 是代码(如 CN)、ISP 在 org 字段
+    return {
+        "ip": d.get("ip", ""),
+        "country": d.get("country", ""),
+        "region": d.get("region", ""),
+        "city": d.get("city", ""),
+        "asn_organization": d.get("org", ""),
+    }
+
+
+def ip_location(proxies: dict | None = None) -> dict:
+    """查询当前出口 IP 及其归属地。
+
+    传入 proxies 时经代理查询（返回的 IP 即代理出口 IP，与目标站看到的一致）；
+    不传则直连。优先 api.ip.sb/geoip，失败自动兜底 ipinfo.io/json。
+    全部失败返回 {"ip":"查询失败 - <原因>",...}，便于卡片区分显示。
     """
-    try:
-        r = requests.get(IPINFO_API, timeout=15)
-        if r.status_code != 200:
-            return _ip_err(f"HTTP {r.status_code}")
-        data = r.json()
-        if not data.get("ip"):
-            return _ip_err("返回无 IP 字段")
-        return data
-    except requests.exceptions.Timeout:
-        return _ip_err("查询超时（15s）")
-    except requests.exceptions.ConnectionError as e:
-        # 截短错误信息，避免卡片被刷屏
-        return _ip_err(f"连不上 api.ip.sb（{str(e)[:60]}）")
-    except Exception as e:
-        return _ip_err(f"{type(e).__name__}: {str(e)[:60]}")
+    last_err = ""
+    for name, url in _GEO_SOURCES:
+        try:
+            r = requests.get(url, timeout=15, proxies=proxies,
+                             verify=False if proxies else True)
+            if r.status_code != 200:
+                last_err = f"HTTP {r.status_code}"
+                continue
+            data = r.json()
+            if not data.get("ip"):
+                last_err = "返回无 IP 字段"
+                continue
+            info = _norm_ipsb(data) if name == "api.ip.sb" else _norm_ipinfo(data)
+            info["_src"] = name
+            return info
+        except requests.exceptions.Timeout:
+            last_err = "查询超时（15s）"
+        except requests.exceptions.ConnectionError as e:
+            last_err = f"连接失败（{str(e)[:50]}）"
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {str(e)[:50]}"
+    log(f"IP 归属地查询失败（已尝试 {len(_GEO_SOURCES)} 个源）: {last_err}", "WARN")
+    return _ip_err(last_err or "未知错误")
 
 
 def _ip_err(reason: str) -> dict:
     return {"ip": f"查询失败 - {reason}", "country": "", "region": "",
-            "city": "", "asn_organization": "", "_error": reason}
+            "city": "", "asn_organization": "", "_error": reason, "_src": "无"}
 
 
 def fmt_location(info: dict) -> str:
@@ -121,30 +213,39 @@ def fmt_location(info: dict) -> str:
     return " / ".join(parts) if parts else ""
 
 
-def net_info_rows() -> tuple[str, str, str]:
-    """生成 IP / 位置 / ISP 三个字段值。
+def net_info_rows(proxies: dict | None = None) -> tuple[str, str, str, str]:
+    """生成 IP / 位置 / ISP / 来源 四个值。
 
-    成功时返回真实信息；查询失败时三列均带"查询失败"前缀且写入日志，
+    成功时返回真实信息；查询失败时四列均带"查询失败"前缀且写入日志，
     便于卡片里一眼看出「是该网络 IP 段被拦了」还是「API 本身抽风」。
     """
-    info = ip_location()
+    info = ip_location(proxies)
     err = info.get("_error")
     if err:
         # 仅在第一次失败时打印日志，避免重复刷屏
         log(f"IP 归属地查询失败: {err}", "WARN")
-        return ("查询失败", f"查询失败（{err}）", "查询失败")
+        return ("查询失败", f"查询失败（{err}）", "查询失败", "无")
     ip = info.get("ip", "未知")
     loc = fmt_location(info) or "未知"
     isp = info.get("asn_organization") or "未知"
-    return ip, loc, isp
+    return ip, loc, isp, info.get("_src", "api.ip.sb")
 
 
-def net_section() -> list[dict]:
-    """生成通知卡片底部的「IP / 位置 / ISP / 来源」两列分区"""
-    ip, loc, isp = net_info_rows()
+def net_section(proxies: dict | None = None) -> list[dict]:
+    """生成通知卡片底部的「IP / 位置 / ISP / 来源」两列分区。
+
+    来源行会标明实际使用的 IP 库（api.ip.sb 或 ipinfo.io 兜底），
+    若经代理查询则追加所用代理主机，便于确认走的是哪条线路。
+    """
+    ip, loc, isp, src = net_info_rows(proxies)
+    host = ""
+    if proxies:
+        h = proxies.get("https") or proxies.get("http") or ""
+        host = h.split("://", 1)[-1]
+    src_label = src + (f" · 代理 {host}" if host else "")
     return [
         {"kind": "fields", "fields": [("IP", ip), ("位置", loc)]},
-        {"kind": "fields", "fields": [("ISP", isp), ("来源", "api.ip.sb")]},
+        {"kind": "fields", "fields": [("ISP", isp), ("来源", src_label)]},
     ]
 
 
@@ -394,15 +495,20 @@ class CaptchaSolver:
 # ---------------------------------------------------------------- 签到主体
 
 class UlzixSigner:
-    def __init__(self, email: str, password: str):
+    def __init__(self, email: str, password: str, proxies: dict | None = None):
         self.email = email
         self.password = password
+        self.proxies = proxies or {}
         self.s = requests.Session()
         self.s.headers.update({
             "User-Agent": UA,
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Origin": BASE_URL,
         })
+        if self.proxies:
+            self.s.proxies = self.proxies
+            # 用户提供的 HTTPS 代理使用自签证书，须关闭校验才能握手
+            self.s.verify = False
         self.csrf = ""
 
     # ---- 工具 ----
@@ -546,13 +652,31 @@ def main() -> int:
     stamp = now_cst().strftime("%Y-%m-%d %H:%M:%S")
     note = f"🕐 {stamp} | UlziX 自动签到"
 
+    # 代理选择（可选）：PROXY_URL 留空则直连；
+    # 配置了则从候选中选一个能访问目标站的 HTTPS 代理，绕过 Cloudflare 海外拦截
+    proxy_raw = env("PROXY_URL")
+    proxies: dict | None = None
+    if proxy_raw:
+        chosen = pick_proxy(proxy_raw)
+        if not chosen:
+            log("配置的代理均不可用，无法签到", "ERROR")
+            fs.send_card("UlziX 云服务 · 配置错误", "red", [
+                {"kind": "heading", "heading": "### ❌ 状态"},
+                {"kind": "text", "text": "PROXY_URL 配置的代理均无法访问目标站，请检查代理地址/端口是否可用"},
+                {"kind": "divider"},
+                *net_section(proxies),
+            ], note)
+            return 1
+        proxies = {"http": chosen, "https": chosen}
+        log(f"使用代理线路: {chosen}")
+
     if not email or not password:
         log("缺少 ULZIX_EMAIL / ULZIX_PASSWORD", "ERROR")
         fs.send_card("UlziX 云服务 · 配置错误", "red", [
             {"kind": "heading", "heading": "### ❌ 状态"},
             {"kind": "text", "text": "缺少账号或密码环境变量"},
             {"kind": "divider"},
-            *net_section(),
+            *net_section(proxies),
         ], note)
         return 1
 
@@ -566,7 +690,7 @@ def main() -> int:
             log(f"随机延迟 {wait}s …")
             time.sleep(wait)
 
-        signer = UlzixSigner(email, password)
+        signer = UlzixSigner(email, password, proxies)
         signer.login()
         st = signer.fetch_status()
 
@@ -597,7 +721,7 @@ def main() -> int:
                     {"kind": "heading", "heading": "### 💪 状态"},
                     {"kind": "text", "text": f"今日已完成签到，连续 {st['streak']} 天"},
                     {"kind": "divider"},
-                    *net_section(),
+                    *net_section(proxies),
                 ]
                 fs.send_card("UlziX 云服务 · 今日已打卡", "blue", sections, note)
             else:
@@ -623,7 +747,7 @@ def main() -> int:
                 {"kind": "text", "text":
                     f"尚未签到，请手动完成（断签会重置连续天数，当前 {st['streak']} 天）"},
                 {"kind": "divider"},
-                *net_section(),
+                *net_section(proxies),
             ], note, button=("前往签到", SIGNIN_PAGE))
             return 0
 
@@ -695,7 +819,7 @@ def main() -> int:
             ]
         sections += [
             {"kind": "divider"},
-            *net_section(),
+            *net_section(proxies),
         ]
 
         fs.send_card("UlziX 云服务 · 打卡成功", "green", sections, note)
@@ -715,7 +839,7 @@ def main() -> int:
             {"kind": "heading", "heading": "### ❌ 状态"},
             {"kind": "text", "text": f"**原因**：{e}\n**建议**：检查打码平台余额与 CAPTCHA_KEY 配置"},
             {"kind": "divider"},
-            *net_section(),
+            *net_section(proxies),
         ], note)
         return 1
 
@@ -728,7 +852,7 @@ def main() -> int:
             {"kind": "heading", "heading": "### ❌ 状态"},
             {"kind": "text", "text": f"**错误**：{str(e)[:400]}"},
             {"kind": "divider"},
-            *net_section(),
+            *net_section(proxies),
         ], note)
         return 1
 
