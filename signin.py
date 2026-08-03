@@ -84,12 +84,32 @@ IPINFO_API = "https://api.ip.sb/geoip"
 
 
 def ip_location() -> dict:
-    """查询当前出口 IP 及其归属地（直连查询，无代理）。失败返回空 dict。"""
+    """查询当前出口 IP 及其归属地（直连查询，无代理）。
+
+    返回示例：{"ip":"x.x.x.x","country":"US","city":"Quincy","asn_organization":"Microsoft"}
+    失败时返回 {"ip":"查询失败 - <原因>","country":"","region":"","city":"",
+                 "asn_organization":"","_error":"<原因>"}，便于上层卡片区分显示。
+    """
     try:
-        r = requests.get(IPINFO_API, timeout=15).json()
-        return r if r.get("ip") else {}
-    except Exception:
-        return {}
+        r = requests.get(IPINFO_API, timeout=15)
+        if r.status_code != 200:
+            return _ip_err(f"HTTP {r.status_code}")
+        data = r.json()
+        if not data.get("ip"):
+            return _ip_err("返回无 IP 字段")
+        return data
+    except requests.exceptions.Timeout:
+        return _ip_err("查询超时（15s）")
+    except requests.exceptions.ConnectionError as e:
+        # 截短错误信息，避免卡片被刷屏
+        return _ip_err(f"连不上 api.ip.sb（{str(e)[:60]}）")
+    except Exception as e:
+        return _ip_err(f"{type(e).__name__}: {str(e)[:60]}")
+
+
+def _ip_err(reason: str) -> dict:
+    return {"ip": f"查询失败 - {reason}", "country": "", "region": "",
+            "city": "", "asn_organization": "", "_error": reason}
 
 
 def fmt_location(info: dict) -> str:
@@ -102,8 +122,17 @@ def fmt_location(info: dict) -> str:
 
 
 def net_info_rows() -> tuple[str, str, str]:
-    """生成 IP / 位置 / ISP 三个字段值，失败时降级为「未知」"""
+    """生成 IP / 位置 / ISP 三个字段值。
+
+    成功时返回真实信息；查询失败时三列均带"查询失败"前缀且写入日志，
+    便于卡片里一眼看出「是该网络 IP 段被拦了」还是「API 本身抽风」。
+    """
     info = ip_location()
+    err = info.get("_error")
+    if err:
+        # 仅在第一次失败时打印日志，避免重复刷屏
+        log(f"IP 归属地查询失败: {err}", "WARN")
+        return ("查询失败", f"查询失败（{err}）", "查询失败")
     ip = info.get("ip", "未知")
     loc = fmt_location(info) or "未知"
     isp = info.get("asn_organization") or "未知"
@@ -377,17 +406,49 @@ class UlzixSigner:
         self.csrf = ""
 
     # ---- 工具 ----
+    @staticmethod
+    def _diagnose_html(r: requests.Response) -> str:
+        """提取诊断信息：状态码、关键响应头、是否 Cloudflare 挑战页、HTML 摘要"""
+        from html import unescape
+        head_text = (r.text or "")[:600].replace("\n", " ").strip()
+        # 简易脱敏：去掉可能的 email/token/密码字面量
+        for kw in ("email", "password", "csrf-token", "token", "key"):
+            head_text = re.sub(
+                rf'({kw}["\']?\s*[:=]\s*["\']?)([^"\'\s,;}}]+)',
+                r"\1***", head_text, flags=re.IGNORECASE)
+        head_text = unescape(head_text)
+        lower = (r.text or "").lower()
+        flags = []
+        if "just a moment" in lower or "cf-chl" in lower or "challenge-form" in lower:
+            flags.append("Cloudflare 挑战页")
+        if "attention required" in lower or "blocked" in lower:
+            flags.append("疑似被封禁")
+        if "<meta name=\"csrf-token\"" in lower:
+            flags.append("页面里有 csrf-token 但正则没匹配上")
+        flag_text = f" | 命中: {', '.join(flags)}" if flags else ""
+        srv = r.headers.get("server", "-")
+        cf_ray = r.headers.get("cf-ray", "-")
+        return (f"HTTP {r.status_code} | Server: {srv} | CF-Ray: {cf_ray}"
+                f" | HTML {len(r.text or '')} 字节{flag_text}\nHTML 头: {head_text}")
+
     def _get_csrf(self, html: str) -> str:
-        m = re.search(r'name="csrf-token"\s+content="([^"]+)"', html)
+        # 同时匹配 content 在前 / 在后两种属性顺序
+        m = re.search(
+            r'<meta\s+name=["\']csrf-token["\']\s+content=["\']([^"\']+)["\']',
+            html) or re.search(
+            r'<meta\s+content=["\']([^"\']+)["\']\s+name=["\']csrf-token["\']',
+            html)
         return m.group(1) if m else ""
 
     # ---- 步骤 1：登录 ----
     def login(self) -> None:
         log("获取登录页 CSRF…")
-        html = self.s.get(f"{BASE_URL}/login", timeout=30).text
-        self.csrf = self._get_csrf(html)
+        r = self.s.get(f"{BASE_URL}/login", timeout=30)
+        self.csrf = self._get_csrf(r.text)
         if not self.csrf:
-            raise RuntimeError("无法解析登录页 CSRFToken")
+            raise RuntimeError(
+                "无法解析登录页 CSRFToken —— 可能是 Cloudflare 拦截\n"
+                + self._diagnose_html(r))
 
         log(f"登录账号 {self.email} …")
         r = self.s.post(
