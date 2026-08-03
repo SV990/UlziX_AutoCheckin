@@ -1,0 +1,48 @@
+name: UlziX 每日自动签到
+
+on:
+  schedule:
+    # GitHub Actions 使用 UTC 时间
+    # 每月仅在 10 天触发（每隔约 3 天：1,4,7,10,13,16,19,22,25,28 号），控制打码消耗
+    - cron: '0 1 1,4,7,10,13,16,19,22,25,28 * *'    # 北京时间 09:00  主签到
+    - cron: '0 12 1,4,7,10,13,16,19,22,25,28 * *'   # 北京时间 20:00  兜底重试
+  workflow_dispatch:        # 支持手动触发（不受 10 天限制，按需补卡）
+
+# 避免两次任务并发执行
+concurrency:
+  group: ulzix-signin
+  cancel-in-progress: false
+
+jobs:
+  signin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 执行签到
+        env:
+          ULZIX_EMAIL:      ${{ secrets.ULZIX_EMAIL }}
+          ULZIX_PASSWORD:   ${{ secrets.ULZIX_PASSWORD }}
+          FEISHU_WEBHOOK:   ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET:    ${{ secrets.FEISHU_SECRET }}
+          # 可在仓库 Variables 覆盖；未设置时用 yescaptcha
+          CAPTCHA_PROVIDER: ${{ vars.CAPTCHA_PROVIDER || 'yescaptcha' }}
+          CAPTCHA_KEY:      ${{ secrets.CAPTCHA_KEY }}
+          CAPTCHA_TIMEOUT:  '180'
+          # 错开整点，降低被风控概率（0-600 秒随机）
+          RANDOM_DELAY:     '600'
+          # 20:00 兜底运行（cron 含 ' 12 ' 的那一条）：若已签到则静默，不重复推送
+          NOTIFY_WHEN_SIGNED: ${{ github.event.schedule == '0 12 1,4,7,10,13,16,19,22,25,28 * *' && 'false' || 'true' }}
+        run: python signin.py
