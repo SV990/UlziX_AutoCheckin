@@ -90,28 +90,28 @@ python signin.py
 
 ```
 [14:40:46] [INFO] 获取登录页 CSRF…
-[14:40:49] [INFO] 登录成功: 依旧是偏爱 (ID=474)
-[14:40:50] [INFO] 今日=2026-08-03 已签到=False 当前积分=33 连续=2天
-[14:40:50] [INFO] 验证码模式=hcaptcha sitekey=1abc99a0-9922-4b3e-9268-2e1e6398d284
+[14:40:49] [INFO] 登录成功: xxx
+[14:40:50] [INFO] 今日=2026-08-03 已签到=False 当前积分=100连续=10天
+[14:40:50] [INFO] 验证码模式=hcaptcha sitekey=xxxxxxxxxxxxxxxxxxxxxx
 [14:40:50] [INFO] 调用打码平台 [yescaptcha] 求解 hCaptcha…
-[14:40:52] [INFO] 打码任务已创建: 4331bb6a-8f06-11f1-a070-5254002457fa
+[14:40:52] [INFO] 打码任务已创建: xxxxxxxxxxxxxxxxxxxxxx
 [14:41:10] [INFO] 打码成功，耗时 19.7s，token 长度 2620
 [14:41:10] [INFO] 提交签到请求…
-[14:41:11] [INFO] 签到成功! 获得=3 等级加成=0 连续=3天 总积分=36
+[14:41:11] [INFO] 签到成功! 获得=x等级加成=x 连续=x天 总积分=xx
 [14:41:11] [INFO] 飞书通知已送达
 ```
 
 重复运行会自动跳过，**不浪费打码额度**：
 
 ```
-[14:41:44] [INFO] 今日=2026-08-03 已签到=True 当前积分=36 连续=3天
+[14:41:44] [INFO] 今日=2026-08-03 已签到=True 当前积分=xx 连续=xx天
 [14:41:44] [INFO] 今日已签到，无需重复操作
 ```
 
 签到接口真实返回结构：
 
 ```json
-{"result":{"points":3,"streak_days":3,"level_bonus":0,"milestone_rewards":[]},"error":null}
+{"result":{"points":x,"streak_days":x,"level_bonus":x,"milestone_rewards":[]},"error":null}
 ```
 
 ---
@@ -136,9 +136,9 @@ git push -u origin main
 
 | Secret 名称 | 是否必需 | 值 |
 |---|:---:|---|
-| `ULZIX_EMAIL` | ✅ | `svs1345@163.com` |
+| `ULZIX_EMAIL` | ✅ | `xxxxxxx` |
 | `ULZIX_PASSWORD` | ✅ | 你的账号密码 |
-| `FEISHU_WEBHOOK` | ✅ | `https://open.feishu.cn/open-apis/bot/v2/hook/4f243e00-...` |
+| `FEISHU_WEBHOOK` | ✅ | `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
 | `CAPTCHA_KEY` | ✅ | YesCaptcha 的 clientKey（用 `manual` 模式则不需要） |
 | `FEISHU_SECRET` | 选填 | 仅当飞书机器人开启签名校验时填写 |
 
@@ -180,13 +180,13 @@ git push -u origin main
 │ **日期**         │ **时间**                  │
 │ 2026-08-03       │ 09:00:12                  │
 │ **账号**         │ **<积分相关>**            │
-│ 'svs1345@163.com'│ 36 点                     │
+│ 'xxxxxxxxx'│ xxx 点                     │
 ├─────────────────────────────────────────────┤
 │ ### 💪 状态                                  │
 │ <本场景的一句话描述>                         │
 ├─────────────────────────────────────────────┤
 │ **IP**             │ **位置**                │
-│ 66.90.98.38        │ Singapore               │
+│ 1.1.1.1            │ 1.11.           │
 │ **ISP**            │ **来源**                │
 │ FDCservers.net     │ api.ip.sb               │
 ├─────────────────────────────────────────────┤
